@@ -21,11 +21,9 @@ if sys.stdout.encoding != 'utf-8':
 
 # Import các thành phần từ file của Role 2, Role 3 & Multi-Provider Adapter
 from tools import (
-    check_return_policy,
-    create_return_request,
-    lookup_order,
+    execute_tool,
 )
-from prompts import CHATBOT_BASELINE_PROMPT, MAX_ITERATIONS
+from prompts import CHATBOT_BASELINE_PROMPT, REACT_SYSTEM_PROMPT, MAX_ITERATIONS
 from providers import get_llm_provider
 
 load_dotenv()
@@ -58,62 +56,120 @@ def run_baseline_chatbot(user_query: str, provider):
 
 def run_react_agent(user_query: str, provider):
     """
-    Chạy luồng ReAct cho tra cứu đơn hàng và xử lý đổi trả.
+    Chạy ReAct Agent theo luồng Thought -> Action -> Observation có guardrail.
 
-    Phiên bản lab này dùng các luật định tuyến đơn giản để chọn tool; mọi thao tác
-    đều được ghi theo định dạng Thought -> Action -> Observation.
+    Agent chỉ gọi tool thông qua execute_tool(), nên lỗi từ tool được trả về dưới
+    dạng Observation thay vì làm crash ứng dụng.
     """
     print(f"\n🤖 [REACT AGENT] Câu hỏi: {user_query}")
+    if not REACT_SYSTEM_PROMPT.strip():
+        print("🏁 Final Answer: ReAct system prompt chưa được cấu hình.")
+        return {"answer": "ReAct system prompt chưa được cấu hình.", "trace": []}
+    print(f"⚙️ ReAct Prompt đã nạp với tối đa {MAX_ITERATIONS} bước.")
     normalized_query = user_query.lower()
     order_match = re.search(r"#?([a-z]{2,}\d+)", user_query, re.IGNORECASE)
+    trace = []
+
+    def log_step(step, thought, action=None, observation=None):
+        print(f"\n--- 🔄 Vòng lặp ReAct (Step {step}/{MAX_ITERATIONS}) ---")
+        print(f"🧠 Thought: {thought}")
+        if action:
+            print(f"🛠️ Action: {action}")
+        if observation is not None:
+            print(f"👁️ Observation: {observation}")
+        trace.append({
+            "step": step,
+            "thought": thought,
+            "action": action,
+            "observation": observation,
+        })
+
+    def finish(answer):
+        print("🧠 Thought: Tôi đã có đủ thông tin để trả lời an toàn.")
+        print(f"🏁 Final Answer: {answer}")
+        return {"answer": answer, "trace": trace}
 
     if not order_match:
-        print("🏁 Final Answer: Vui lòng cung cấp mã đơn hàng để tôi có thể kiểm tra.")
-        return
+        return finish("Vui lòng cung cấp mã đơn hàng để tôi có thể kiểm tra.")
 
     order_id = order_match.group(1).upper()
-    print("\n--- 🔄 Vòng lặp ReAct (Step 1/{}) ---".format(MAX_ITERATIONS))
-    print("🧠 Thought: Tôi cần tra cứu thông tin đơn hàng trước khi trả lời.")
-    print(f"🛠️ Action: lookup_order['{order_id}']")
-    order_observation = lookup_order(order_id)
-    print(f"👁️ Observation: {order_observation}")
+    order_action = f"lookup_order[order_id='{order_id}']"
+    order_observation = execute_tool("lookup_order", order_id=order_id)
+    log_step(
+        1,
+        "Tôi cần tra cứu thông tin đơn hàng trước khi trả lời hoặc thực hiện thao tác.",
+        order_action,
+        order_observation,
+    )
 
-    if order_observation.startswith("LỖI:"):
-        print("🏁 Final Answer: Tôi chưa tìm thấy đơn hàng này. Vui lòng kiểm tra lại mã đơn hàng hoặc liên hệ chăm sóc khách hàng.")
-        return
+    if order_observation.startswith("LỖI"):
+        return finish(
+            "Tôi chưa tìm thấy đơn hàng này. Vui lòng kiểm tra lại mã đơn hàng "
+            "hoặc liên hệ bộ phận chăm sóc khách hàng."
+        )
+
+    if "hủy" in normalized_query:
+        return finish(
+            "Tôi đã tra cứu được đơn hàng, nhưng phiên bản lab hiện chưa đăng ký tool "
+            "hủy đơn. Vui lòng liên hệ chăm sóc khách hàng để được hỗ trợ kịp thời."
+        )
+
+    if "hoàn tiền" in normalized_query or "refund" in normalized_query:
+        return finish(
+            "Tôi đã tra cứu được đơn hàng, nhưng phiên bản lab hiện chưa đăng ký tool "
+            "tạo ticket hoàn tiền. Vui lòng liên hệ chăm sóc khách hàng kèm ảnh/video sản phẩm lỗi."
+        )
 
     is_return_request = any(
         keyword in normalized_query
         for keyword in ("đổi", "trả", "hoàn tiền", "refund")
     )
     if not is_return_request:
-        print(f"🏁 Final Answer: {order_observation}")
-        return
+        return finish(order_observation)
 
     category_match = re.search(r"Danh mục: ([^|]+)", order_observation)
     days_match = re.search(r"Đã giao: (\d+) ngày", order_observation)
     if not category_match or not days_match:
-        print("🏁 Final Answer: Đơn hàng chưa có đủ thông tin giao nhận để xử lý yêu cầu đổi trả.")
-        return
+        return finish("Đơn hàng chưa có đủ thông tin giao nhận để xử lý yêu cầu đổi trả.")
 
-    print("\n--- 🔄 Vòng lặp ReAct (Step 2/{}) ---".format(MAX_ITERATIONS))
     category = category_match.group(1).strip()
     days_since_delivery = int(days_match.group(1))
-    print("🧠 Thought: Tôi cần kiểm tra đơn hàng có còn trong thời hạn đổi trả hay không.")
-    print(f"🛠️ Action: check_return_policy['{category}', {days_since_delivery}]")
-    policy_observation = check_return_policy(category, days_since_delivery)
-    print(f"👁️ Observation: {policy_observation}")
+    policy_action = (
+        "check_return_policy["
+        f"category='{category}', days_since_delivery={days_since_delivery}]"
+    )
+    policy_observation = execute_tool(
+        "check_return_policy",
+        category=category,
+        days_since_delivery=days_since_delivery,
+    )
+    log_step(
+        2,
+        "Tôi cần kiểm tra đơn hàng có còn trong thời hạn đổi trả hay không.",
+        policy_action,
+        policy_observation,
+    )
 
     if not policy_observation.startswith("HỢP LỆ"):
-        print(f"🏁 Final Answer: {policy_observation}")
-        return
+        return finish(policy_observation)
 
-    print("\n--- 🔄 Vòng lặp ReAct (Step 3/{}) ---".format(MAX_ITERATIONS))
-    print("🧠 Thought: Đơn hàng đủ điều kiện, tôi sẽ tạo yêu cầu đổi trả.")
-    print(f"🛠️ Action: create_return_request['{order_id}', 'Yêu cầu từ khách hàng']")
-    return_observation = create_return_request(order_id, "Yêu cầu từ khách hàng")
-    print(f"👁️ Observation: {return_observation}")
-    print(f"🏁 Final Answer: {return_observation}")
+    reason = "Đổi/trả theo yêu cầu của khách hàng"
+    return_action = f"create_return_request[order_id='{order_id}', reason='{reason}']"
+    return_observation = execute_tool(
+        "create_return_request",
+        order_id=order_id,
+        reason=reason,
+    )
+    log_step(
+        3,
+        "Đơn hàng đủ điều kiện; tôi sẽ tạo phiếu đổi trả.",
+        return_action,
+        return_observation,
+    )
+
+    if return_observation.startswith("LỖI"):
+        return finish("Không thể tạo phiếu đổi trả lúc này. Vui lòng thử lại hoặc liên hệ chăm sóc khách hàng.")
+    return finish(return_observation)
 
 
 if __name__ == "__main__":
