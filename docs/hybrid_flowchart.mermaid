@@ -1,0 +1,37 @@
+flowchart TD
+    start([Người dùng gửi câu hỏi]) --> classify{Câu hỏi có cần<br/>dữ liệu hoặc thao tác thực tế?}
+
+    classify -->|FAQ/chính sách chung| baseline[Chatbot Baseline<br/>1 LLM call, 0 tool call]
+    baseline --> fallback[Safe fallback khi không có<br/>chính sách hoặc dữ liệu xác thực]
+
+    classify -->|Tra cứu đơn / đổi trả / hoàn tiền / hủy đơn| react[ReAct Agent]
+    react --> order_id{Có mã đơn hàng?}
+    order_id -->|Không| ask_id[Final Answer:<br/>Yêu cầu cung cấp mã đơn hàng]
+    order_id -->|Có| lookup[Thought → Action:<br/>lookup_order]
+
+    lookup --> found{Observation:<br/>Đơn hàng tồn tại?}
+    found -->|Không| not_found[Final Answer:<br/>Thông báo mã đơn không tồn tại]
+    found -->|Có| intent{Ý định của người dùng?}
+
+    intent -->|Tra cứu trạng thái/thanh toán/chi tiết| order_answer[Final Answer:<br/>Trả lời từ dữ liệu đơn hàng]
+    intent -->|Đổi hoặc trả hàng| policy[Thought → Action:<br/>check_return_policy]
+    policy --> eligible{Observation:<br/>Đủ điều kiện?}
+    eligible -->|Không / quá hạn| reject[Final Answer:<br/>Từ chối lịch sự theo chính sách]
+    eligible -->|Có| create[Thought → Action:<br/>create_return_request]
+    create --> return_done[Final Answer:<br/>Trả mã phiếu đổi trả]
+
+    intent -->|Hoàn tiền hoặc hủy đơn| unavailable[Final Answer:<br/>Safe fallback: tool chưa được đăng ký]
+
+    lookup -. Observation .-> found
+    policy -. Observation .-> eligible
+    create -. Observation .-> return_done
+
+    classDef baselineStyle fill:#dbeafe,stroke:#2563eb,color:#172554
+    classDef reactStyle fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef guardStyle fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef finishStyle fill:#f3f4f6,stroke:#6b7280,color:#111827
+
+    class baseline,fallback baselineStyle
+    class react,lookup,policy,create reactStyle
+    class classify,order_id,found,intent,eligible guardStyle
+    class ask_id,not_found,order_answer,reject,return_done,unavailable finishStyle
