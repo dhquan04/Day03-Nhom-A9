@@ -5,6 +5,7 @@ File chính ghép nối tất cả các thành phần: Tools + Prompts + Test Ca
 
 import json
 import os
+import re
 import sys
 from dotenv import load_dotenv
 
@@ -19,8 +20,12 @@ if sys.stdout.encoding != 'utf-8':
         pass
 
 # Import các thành phần từ file của Role 2, Role 3 & Multi-Provider Adapter
-from tools import AVAILABLE_TOOLS, get_weather, search_flights
-from prompts import CHATBOT_BASELINE_PROMPT, REACT_SYSTEM_PROMPT, MAX_ITERATIONS
+from tools import (
+    check_return_policy,
+    create_return_request,
+    lookup_order,
+)
+from prompts import CHATBOT_BASELINE_PROMPT, MAX_ITERATIONS
 from providers import get_llm_provider
 
 load_dotenv()
@@ -48,34 +53,67 @@ def run_baseline_chatbot(user_query: str, provider):
     # Gọi LLM Provider thực hiện sinh câu trả lời
     response = provider.generate(user_query, system_prompt=CHATBOT_BASELINE_PROMPT)
     print(f"🤖 Chatbot trả lời:\n{response}")
+    return response
 
 
 def run_react_agent(user_query: str, provider):
     """
-    Dựng vòng lặp ReAct Agent (Thought -> Action -> Observation) có Guardrails.
+    Chạy luồng ReAct cho tra cứu đơn hàng và xử lý đổi trả.
+
+    Phiên bản lab này dùng các luật định tuyến đơn giản để chọn tool; mọi thao tác
+    đều được ghi theo định dạng Thought -> Action -> Observation.
     """
     print(f"\n🤖 [REACT AGENT] Câu hỏi: {user_query}")
-    step = 0
-    
-    while step < MAX_ITERATIONS:
-        step += 1
-        print(f"\n--- 🔄 Vòng lặp ReAct (Step {step}/{MAX_ITERATIONS}) ---")
-        
-        if step == 1:
-            print("🧠 Thought: Câu hỏi này cần tra cứu thời tiết thời gian thực.")
-            print("🛠️ Action: get_weather['Hà Nội']")
-            
-            # Thực thi tool
-            obs = get_weather("Hà Nội")
-            print(f"👁️ Observation: {obs}")
-            
-        elif step == 2:
-            print("🧠 Thought: Tôi đã có thông tin thời tiết Hà Nội, giờ tôi có thể tư vấn trang phục.")
-            print("🏁 Final Answer: Thời tiết Hà Nội hôm nay 28°C, nắng nhẹ. Bạn nên mặc áo phông thoáng mát!")
-            break
-            
-    if step >= MAX_ITERATIONS:
-        print(f"🛡️ GUARDRAIL TRIGGERED: Đã đạt giới hạn tối đa {MAX_ITERATIONS} bước. Ngắt lặp an toàn!")
+    normalized_query = user_query.lower()
+    order_match = re.search(r"#?([a-z]{2,}\d+)", user_query, re.IGNORECASE)
+
+    if not order_match:
+        print("🏁 Final Answer: Vui lòng cung cấp mã đơn hàng để tôi có thể kiểm tra.")
+        return
+
+    order_id = order_match.group(1).upper()
+    print("\n--- 🔄 Vòng lặp ReAct (Step 1/{}) ---".format(MAX_ITERATIONS))
+    print("🧠 Thought: Tôi cần tra cứu thông tin đơn hàng trước khi trả lời.")
+    print(f"🛠️ Action: lookup_order['{order_id}']")
+    order_observation = lookup_order(order_id)
+    print(f"👁️ Observation: {order_observation}")
+
+    if order_observation.startswith("LỖI:"):
+        print("🏁 Final Answer: Tôi chưa tìm thấy đơn hàng này. Vui lòng kiểm tra lại mã đơn hàng hoặc liên hệ chăm sóc khách hàng.")
+        return
+
+    is_return_request = any(
+        keyword in normalized_query
+        for keyword in ("đổi", "trả", "hoàn tiền", "refund")
+    )
+    if not is_return_request:
+        print(f"🏁 Final Answer: {order_observation}")
+        return
+
+    category_match = re.search(r"Danh mục: ([^|]+)", order_observation)
+    days_match = re.search(r"Đã giao: (\d+) ngày", order_observation)
+    if not category_match or not days_match:
+        print("🏁 Final Answer: Đơn hàng chưa có đủ thông tin giao nhận để xử lý yêu cầu đổi trả.")
+        return
+
+    print("\n--- 🔄 Vòng lặp ReAct (Step 2/{}) ---".format(MAX_ITERATIONS))
+    category = category_match.group(1).strip()
+    days_since_delivery = int(days_match.group(1))
+    print("🧠 Thought: Tôi cần kiểm tra đơn hàng có còn trong thời hạn đổi trả hay không.")
+    print(f"🛠️ Action: check_return_policy['{category}', {days_since_delivery}]")
+    policy_observation = check_return_policy(category, days_since_delivery)
+    print(f"👁️ Observation: {policy_observation}")
+
+    if not policy_observation.startswith("HỢP LỆ"):
+        print(f"🏁 Final Answer: {policy_observation}")
+        return
+
+    print("\n--- 🔄 Vòng lặp ReAct (Step 3/{}) ---".format(MAX_ITERATIONS))
+    print("🧠 Thought: Đơn hàng đủ điều kiện, tôi sẽ tạo yêu cầu đổi trả.")
+    print(f"🛠️ Action: create_return_request['{order_id}', 'Yêu cầu từ khách hàng']")
+    return_observation = create_return_request(order_id, "Yêu cầu từ khách hàng")
+    print(f"👁️ Observation: {return_observation}")
+    print(f"🏁 Final Answer: {return_observation}")
 
 
 if __name__ == "__main__":
@@ -91,11 +129,15 @@ if __name__ == "__main__":
     tests = load_test_cases()
     print(f"✅ Đã tải thành công {len(tests)} Test Cases từ config/test_cases.json\n")
     
-    # Chạy thử câu test số 3
-    sample_query = tests[2]["question"]
-    
     print("--- DEMO 1: CHẠY TRÊN CHATBOT BASELINE ---")
-    run_baseline_chatbot(sample_query, provider)
+    # Each baseline case makes one LLM call and never invokes a tool.
+    for test_case in tests:
+        print(f"\n[Test case #{test_case['id']}]")
+        run_baseline_chatbot(test_case["question"], provider)
+
+    # Dùng case đổi size để trình diễn đủ luồng tra cứu -> kiểm tra chính sách
+    # -> tạo phiếu đổi trả với các tool trong tools.py.
+    sample_query = tests[3]["question"]
     
     print("\n--- DEMO 2: CHẠY TRÊN REACT AGENT ---")
     run_react_agent(sample_query, provider)
