@@ -26,9 +26,14 @@ def policy(category: str, days: int) -> tuple[bool, str]:
 def process_message(message: str, mode: str) -> dict:
     save_message("user", message)
     if mode == "baseline":
-        answer = "Tôi không thể xác minh dữ liệu đơn hàng hoặc thực hiện thao tác thực tế ở chế độ Chatbot Baseline. Vui lòng dùng ReAct Agent hoặc liên hệ CSKH."
+        # Baseline luôn chỉ gọi LLM đúng một lần và không dùng tool/database.
+        from prompts import CHATBOT_BASELINE_PROMPT
+        from providers import get_llm_provider
+
+        provider = get_llm_provider()
+        answer = provider.generate(message, system_prompt=CHATBOT_BASELINE_PROMPT)
         save_message("assistant", answer)
-        return {"answer": answer, "trace": [], "order": None, "mode": "baseline"}
+        return {"answer": answer, "trace": [], "order": None, "mode": "baseline", "provider": provider.__class__.__name__}
 
     match = ORDER_PATTERN.search(message)
     if not match:
