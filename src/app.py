@@ -172,6 +172,87 @@ def run_react_agent(user_query: str, provider):
     return finish(return_observation)
 
 
+class AutonomousOrderAgent:
+    """Bonus Level 4: agent có Planning, Memory và tự đánh giá tiến độ."""
+
+    def __init__(self, max_steps: int = 4):
+        self.max_steps = max_steps
+        self.memory = []
+
+    def _remember(self, step: int, plan: str, result: str) -> None:
+        self.memory.append({"step": step, "plan": plan, "result": result})
+        print(f"💾 Memory: Đã lưu bước {step} ({len(self.memory)} mục trong bộ nhớ).")
+
+    def make_plan(self, user_query: str) -> list[str]:
+        """Tự phân rã mục tiêu thành các bước có thể thực hiện."""
+        normalized_query = user_query.lower()
+        plan = ["Trích xuất mã đơn và tra cứu thông tin đơn hàng"]
+        if any(keyword in normalized_query for keyword in ("đổi", "trả", "hoàn tiền")):
+            plan.append("Kiểm tra điều kiện đổi trả theo ngành hàng và thời gian giao")
+            plan.append("Tạo phiếu đổi trả nếu đơn hàng hợp lệ")
+        plan.append("Tự đánh giá kết quả và trả lời người dùng")
+        return plan[:self.max_steps]
+
+    def execute(self, user_query: str) -> dict:
+        print(f"\n🚀 [AUTONOMOUS AGENT] Mục tiêu: {user_query}")
+        plan = self.make_plan(user_query)
+        print("📋 Planning:")
+        for number, item in enumerate(plan, start=1):
+            print(f"  {number}. {item}")
+
+        order_match = re.search(r"#?([a-z]{2,}\d+)", user_query, re.IGNORECASE)
+        if not order_match:
+            answer = "Tôi cần mã đơn hàng trước khi có thể lập kế hoạch xử lý yêu cầu này."
+            self._remember(1, "Yêu cầu mã đơn", answer)
+            print(f"🏁 Final Answer: {answer}")
+            return {"answer": answer, "memory": self.memory}
+
+        order_id = order_match.group(1).upper()
+        order = execute_tool("lookup_order", order_id=order_id)
+        print(f"\n🛠️ Step 1 — lookup_order('{order_id}')\n👁️ Observation: {order}")
+        self._remember(1, plan[0], order)
+        if order.startswith("LỖI"):
+            answer = "Không tìm thấy đơn hàng; Agent dừng kế hoạch an toàn."
+            print(f"🎯 Self-evaluation: Không đủ dữ liệu để tiếp tục.\n🏁 Final Answer: {answer}")
+            return {"answer": answer, "memory": self.memory}
+
+        requires_return = len(plan) > 2
+        if not requires_return:
+            answer = f"Kế hoạch đã hoàn thành: {order}"
+            self._remember(2, plan[-1], answer)
+            print(f"🎯 Self-evaluation: Hoàn thành mục tiêu tra cứu.\n🏁 Final Answer: {answer}")
+            return {"answer": answer, "memory": self.memory}
+
+        category_match = re.search(r"Danh mục: ([^|]+)", order)
+        days_match = re.search(r"Đã giao: (\d+) ngày", order)
+        if not category_match or not days_match:
+            answer = "Thiếu thông tin giao nhận; Agent dừng trước khi tạo phiếu."
+            self._remember(2, plan[1], answer)
+            print(f"🎯 Self-evaluation: Guardrail đã ngăn thao tác không an toàn.\n🏁 Final Answer: {answer}")
+            return {"answer": answer, "memory": self.memory}
+
+        category = category_match.group(1).strip()
+        days = int(days_match.group(1))
+        policy = execute_tool("check_return_policy", category=category, days_since_delivery=days)
+        print(f"\n🛠️ Step 2 — check_return_policy('{category}', {days})\n👁️ Observation: {policy}")
+        self._remember(2, plan[1], policy)
+        if not policy.startswith("HỢP LỆ"):
+            answer = policy
+            self._remember(3, plan[-1], "Từ chối an toàn theo policy.")
+            print(f"🎯 Self-evaluation: Đơn không đủ điều kiện, không tạo phiếu.\n🏁 Final Answer: {answer}")
+            return {"answer": answer, "memory": self.memory}
+
+        reason = "Yêu cầu đổi/trả từ khách hàng"
+        ticket = execute_tool("create_return_request", order_id=order_id, reason=reason)
+        print(f"\n🛠️ Step 3 — create_return_request('{order_id}')\n👁️ Observation: {ticket}")
+        self._remember(3, plan[2], ticket)
+        answer = ticket
+        self._remember(4, plan[-1], "Mục tiêu hoàn thành: đã tạo phiếu đổi trả.")
+        print("🎯 Self-evaluation: Hoàn thành toàn bộ kế hoạch và đã lưu dấu vết vào Memory.")
+        print(f"🏁 Final Answer: {answer}")
+        return {"answer": answer, "memory": self.memory}
+
+
 if __name__ == "__main__":
     print("==================================================")
     print("🏫 ĐẠI HỌC VINUNI - BÀI LAB 3: CHATBOT VS REACT AGENT")
@@ -184,6 +265,10 @@ if __name__ == "__main__":
     
     tests = load_test_cases()
     print(f"✅ Đã tải thành công {len(tests)} Test Cases từ config/test_cases.json\n")
+
+    if "--autonomous-demo" in sys.argv:
+        AutonomousOrderAgent().execute(tests[7]["question"])
+        raise SystemExit(0)
     
     print("--- DEMO 1: CHẠY TRÊN CHATBOT BASELINE ---")
     # Each baseline case makes one LLM call and never invokes a tool.
